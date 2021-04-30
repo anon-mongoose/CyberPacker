@@ -1,0 +1,855 @@
+#!/bin/bash
+# gzexe: compressor for Unix executables.
+# Use this only for binaries that you do not use frequently.
+#
+# The compressed version is a shell script which decompresses itself after
+# skipping $skip lines of shell commands.  We try invoking the compressed
+# executable with the original name (for programs looking at their name).
+# We also try to retain the original file permissions on the compressed file.
+# For safety reasons, gzexe will not create setuid or setgid shell scripts.
+
+# WARNING: the first line of this file must be either : or #!/bin/sh
+# The : is required for some old versions of csh.
+# On Ultrix, /bin/sh is too buggy, change the first line to: #!/bin/sh5
+
+
+# Copyright (C) 1998, 2002, 2004, 2006, 2007 Free Software Foundation
+# Copyright (C) 1993 Jean-loup Gailly
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+tab='	'
+nl='
+'
+IFS=" $tab$nl"
+
+version='CyberPacker (based on gzexe 1.1) 1.0
+Copyright (C) 2007, 2011-2013 Free Software Foundation, Inc.
+This is free software.  You may redistribute copies of it under the terms of
+the GNU General Public License <http://www.gnu.org/licenses/gpl.html>.
+There is NO WARRANTY, to the extent permitted by law.
+
+Written originaly by Jean-loup Gailly.
+Improved by Gautier CASTEUR.'
+
+usage="Usage: $0 [OPTION] [IMACROH] FILE...
+Rename each FILE with a compressed version of itself, renaming FILE to FILE~.
+
+  -d                        Decompress each FILE instead of compressing it.
+  -f [FINGERPTINT FILE]     Specifiy the file to fingerprint a machine.
+  -h  --help                Display this help and exit.
+  -v  --version             Output version information and exit."
+
+bindir='/bin'
+case $1 in
+--__bindir) bindir=${2?}; shift; shift;;
+esac
+PATH=$bindir:$PATH
+
+correctChars="#no#"
+correctCharsPathfile=""
+
+if [ $# -eq 1 ]; then
+  if [ $1 = "-h" ] || [ $1 = "--help" ]; then
+    set -- "--help"
+  elif [ $1 = "-v" ] || [ $1 = "--version" ]; then
+    set -- "--version"
+  fi
+
+elif [ $# -lt 2 ] || [ $# -gt 4 ]; then
+  echo "Error: Too few or much arguments (2 minimum and 4 maximum)."
+  exit 0
+elif [ $# -eq 2 ] && $(echo $1 | egrep -q '^[IMACROHimacroh]+$'); then
+  if [ ! -e $2 ] || [ ! -f $2 ] || [ ! -r $2 ]; then
+    echo "Error: the executable does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+    exit 0
+  else
+    correctChars=$1
+    set -- "$2"
+  fi
+
+elif [ $# -eq 3 ]; then
+  if [ $1 = "-d" ] &&  $(echo $2 | egrep -q '^[IMACROHimacroh]+$'); then
+    correctChars=$2
+    if [ ! -e $3 ] || [ ! -f $3 ] || [ ! -r $3 ]; then
+      echo "Error: the executable does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+      exit 0
+    else
+      set -- "-d" "$3"
+    fi
+  elif [ $1 = "-f" ]; then
+    correctCharsPathfile=$2
+    if [ ! -e $correctCharsPathfile ] || [ ! -f $correctCharsPathfile ] || [ ! -r $correctCharsPathfile ]; then
+      echo "Error: the file containing the machine fingerprint does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+      exit 0
+    elif [ ! -e $3 ] || [ ! -f $3 ] || [ ! -r $3 ]; then
+      echo "Error: the executable does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+      exit 0
+    else
+      set -- "$3"
+    fi
+  else
+    echo "Incorrect arguments. Use the --help option to get more info about the program."
+    exit 0
+  fi
+
+elif [ $# -eq 4 ]; then
+  if [ $1 = "-d" ] && [ $2 = "-f" ]; then
+    correctCharsPathfile=$3
+  elif [ $1 = "-f" ] && [ $3 = "-d" ]; then
+    correctCharsPathfile=$2
+  else
+    echo "Incorrect arguments. Use the --help option to get more info about the program."
+    exit 0
+  fi
+  if [ ! -e $correctCharsPathfile ] || [ ! -f $correctCharsPathfile ] || [ ! -r $correctCharsPathfile ]; then
+    echo "Error: the file containing the machine fingerprint does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+    exit 0
+  elif  [ ! -e $4 ] || [ ! -f $4 ] || [ ! -r $4 ]; then
+    echo "Error: the executable does not exist OR is not a file OR is not readable. Use the --help option to get more info about the program."
+    exit 0
+  else
+    set -- "-d" "$4"
+  fi
+
+else
+  echo "Incorrect argument.\nUse the --help option to get more info about the program."
+  exit 0
+fi
+
+
+decomp=0
+res=0
+
+while :; do
+  case $1 in
+  -d) decomp=1; shift;;
+  --h*) exec echo "$usage";;
+  --v*) exec echo "$version";;
+  --) shift; break;;
+  *) break;;
+  esac
+done
+
+if test $# -eq 0; then
+  echo >&2 "$0: missing operand
+Try \`$0 --help' for more information."
+  exit 1
+fi
+
+tmp=
+trap 'res=$?
+  test -n "$tmp" && rm -f "$tmp"
+  (exit $res); exit $res
+' 0 1 2 3 5 10 13 15
+
+mktemp_status=
+
+for i do
+  case $i in
+  -*) file=./$i;;
+  *)  file=$i;;
+  esac
+  if test ! -f "$file" || test ! -r "$file"; then
+    res=$?
+    echo >&2 "$0: $i is not a readable regular file"
+    continue
+  fi
+  if test $decomp -eq 0; then
+    if sed -e 1d -e 2q "$file" | grep "^skip=[0-9][0-9]*$" >/dev/null; then
+      echo >&2 "$0: $i is already gzexe'd"
+      continue
+    fi
+  fi
+  if test -u "$file"; then
+    echo >&2 "$0: $i has setuid permission, unchanged"
+    continue
+  fi
+  if test -g "$file"; then
+    echo >&2 "$0: $i has setgid permission, unchanged"
+    continue
+  fi
+  case /$file in
+  */basename | */bash | */cat | */chmod | */cp | \
+  */dirname | */echo | */expr | */gzip | \
+  */ln | */mkdir | */mktemp | */mv | */rm | \
+  */sed | */sh | */sleep | */test | */tail)
+    echo >&2 "$0: $i might depend on itself"; continue;;
+  esac
+
+  dir=`dirname "$file"` || dir=$TMPDIR
+  test -d "$dir" && test -w "$dir" && test -x "$dir" || dir=/tmp
+  test -n "$tmp" && rm -f "$tmp"
+  if test -z "$mktemp_status"; then
+    type mktemp >/dev/null 2>&1
+    mktemp_status=$?
+  fi
+  if test $mktemp_status -eq 0; then
+    tmp=`TMPDIR=$dir mktemp -t gzexeXXXXXX`
+  else
+    tmp=$dir/gzexe$$
+  fi && { cp -p "$file" "$tmp" 2>/dev/null || cp "$file" "$tmp"; } || {
+    res=$?
+    echo >&2 "$0: cannot copy $file"
+    continue
+  }
+  if test -w "$tmp"; then
+    writable=1
+  else
+    writable=0
+    chmod u+w "$tmp" || {
+      res=$?
+      echo >&2 "$0: cannot chmod $tmp"
+      continue
+    }
+  fi
+
+  # Compression
+  if test $decomp -eq 0; then
+    if [ $correctChars = "#no#" ]; then
+      export PYTHON_ARG1="--file"
+      export PYTHON_ARG2=$correctCharsPathfile
+      export PYTHON_ARG3=""
+    else
+      export PYTHON_ARG1=$correctChars
+      export PYTHON_ARG2=""
+      export PYTHON_ARG3=""
+    fi
+
+    read -sp 'Encryption password: ' passvar
+    echo
+    #pass2var=$passvar$(python3 ./scripts/fingerprinting.py MACROH | grep "EK=" | cut -c4-)
+    pass2var=$passvar$(echo $(python3 <<  'END'
+#!/bin/usr/python3
+import hashlib, base64, sys, os
+
+#argsTab = [str(os.environ['PYTHON_ARG1']), str(os.environ['PYTHON_ARG2']), str(os.environ['PYTHON_ARG3'])]
+argsTab = ["fingerprinting.py"]
+if str(os.environ['PYTHON_ARG1'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG1']))
+if str(os.environ['PYTHON_ARG2'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG2']))
+if str(os.environ['PYTHON_ARG3'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG3']))
+#print(argsTab)
+
+def main():
+    #Messages
+    msgHelp =  f" This script fingerprints a machine. The result is the concatenation of data gathered and its sha256 hash.\n\n The parametters are the following:\n"
+    msgHelp += f"   I   Machine ID (best)\n   M   MAC Address\n   A   Architecture of the processor\n   C   Number of logical cores of the machine\n"
+    msgHelp += f"   R   RAM amount in GB\n   O   Operating System name (Linux, Windows...)\n   H   Hostname\n\nExamples:\n"
+    msgHelp += f"   {argsTab[0]}  -h, --help                  Print this help message\n"
+    msgHelp += f"   {argsTab[0]}  -f, --file  [FILE PATH]     Fingerprints a machine based on info in a file (see the notes below)\n"
+    msgHelp += f"   {argsTab[0]}  [IMACROH]                   Fingerprints this machine based on the specified parameters\n"
+    msgHelp += f"   {argsTab[0]}  MOH                         Fingerprints this machine based on its MAC Address, OS and Hostname\n"
+    msgHelp += f"   {argsTab[0]}  ACMR                        Fingerprints this machine based on its Architecture, Core numbers, MAC Address and RAM amount\n"
+    msgHelp += f"   {argsTab[0]}  IMACROH                      Fingerprints this machine based on all parametters available\n\n"
+    msgHelp += f"   Notes:\n    If you use the fingerprint method based on file, this one must look like this:\n"
+    msgHelp += f"      MACHINE_ID=\n      MAC=\n      ARCH_PROC=\n      CORES=\n      RAM_GB=\n      OS=\n      HOSTNAME=\n"
+    msgHelp += f"    Only fill the fields you want to base the fingerprint on and let the others empty."
+
+    msgUsage = f" Usage:  {argsTab[0]}  <options>\n See {argsTab[0]}  --help for more information."
+
+    correctChars = "IMACROH"
+
+    fingerprintDic = {"MACHINE_ID" : "",
+                      "MAC" : "",
+                      "ARCH_PROC" : "",
+                      "CORES" : "",
+                      "RAM_GB" : "",
+                      "OS" : "",
+                      "HOSTNAME" : ""}
+
+    # Test args
+    if len(argsTab) < 2 or len(argsTab) > 3 :
+        print(msgUsage)
+        print(len(argsTab))
+        return 0
+
+    if len(argsTab)==2 and (argsTab[1]=="-h" or argsTab[1]=="--help"):
+        print(msgHelp)
+        return 1
+
+    elif len(argsTab)==2 and checkArg(argsTab[1].upper(), correctChars):
+        # Keeping only unique chars
+        uniqueArg = ""
+        for char in argsTab[1].upper():
+            if char not in uniqueArg:
+                uniqueArg += char
+        enckey = fingerprintFromMachine(fingerprintDic, uniqueArg)
+        print(enckey)
+        return 1
+
+    elif len(argsTab)==3 and (argsTab[1]=="-f" or argsTab[1]=="--file"):
+        enckey = fingerprintFromFile(fingerprintDic, argsTab[2])
+        print(enckey)
+        return 1
+
+    else:
+        print("nok")
+
+# Check the arg validity
+def checkArg(argString, correctChars):
+    nbCorrectChars = 0
+    for char in argString:
+        for correctChar in correctChars:
+            if char == correctChar:
+                nbCorrectChars += 1
+    if len(argString) == nbCorrectChars:
+        return True
+    else:
+        return False
+
+# Getting info from file
+def fingerprintFromFile(dic, filePath):
+    try:
+        fpFile = open(filePath, "r")
+    except FileNotFoundError:
+        print("File not found. Please, check if the path is valid or the file exists.")
+        return "#NONE#"
+
+    for line in fpFile.readlines():
+        try:
+            splitLine = line.split("=")
+            if (splitLine[0] == "MAC" or splitLine[0] == "OS") and splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1].upper()
+            elif (splitLine[0] == "ARCH_PROC" or splitLine[0] == "MACHINE_ID" or splitLine[0] == "HOSTNAME") and splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1].lower()
+            elif splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1]
+        except KeyError:
+            pass
+    fpFile.close()
+
+    return generateEK(dic)
+
+# Getting info directly from machine
+def fingerprintFromMachine(dic, uniqueArg):
+    if "I" in uniqueArg:
+        cmdOutput = str(os.popen("cat /etc/machine-id").read())
+        dic["MACHINE_ID"] = cmdOutput[:-1] # to remove the \n
+    if "M" in uniqueArg:
+        try:
+            import uuid, re
+            dic["MAC"] = ':'.join(re.findall('..', '%012x' % uuid.getnode())).upper()
+        except ModuleNotFoundError:
+            print("uuid or re module missing. Cannot get MAC Address.")
+
+    if "A" in uniqueArg or "O" in uniqueArg:
+        try:
+            import platform
+            if "A" in uniqueArg:
+                dic["ARCH_PROC"] = platform.processor().lower()
+            if "O" in uniqueArg:
+                dic["OS"] = platform.system().upper().upper()
+        except ModuleNotFoundError:
+            print("platform module missing. Cannot get OS and System Architecture.")
+
+    if "C" in uniqueArg:
+        try:
+            import multiprocessing
+            dic["CORES"] = str(multiprocessing.cpu_count())
+        except ModuleNotFoundError:
+            print("multiprocessing module missing. Cannot get CPU cores number.")
+
+    if "R" in uniqueArg:
+        try:
+            import psutil
+            dic["RAM_GB"] = str(round(psutil.virtual_memory().total / (1024.0 **3)))
+        except ModuleNotFoundError:
+            try:
+                cmdOutput = os.popen("grep MemTotal /proc/meminfo").read()
+                tmp = ""
+                for char in cmdOutput:
+                    if char.isdigit():
+                        tmp += char
+                dic["RAM_GB"] = str((round(int(tmp) / (1024.0), -3))/1000)
+            except NameError:
+                print("psutil and os module missing. Cannot get RAM amount.")
+
+    if "H" in uniqueArg:
+        try:
+            import socket
+            dic["HOSTNAME"] = socket.gethostname().lower()
+        except ModuleNotFoundError:
+            print("socket module missing. Cannot get hostname.")
+
+    return generateEK(dic)
+
+# Building an encryption key
+def generateEK(fpdic):
+    partEncryptionKey = ""
+    nbEmptyField = 0
+    for key in fpdic:
+        if fpdic[key] != "":
+            partEncryptionKey += fpdic[key]
+        else:
+            nbEmptyField += 1
+
+    # Minimum one field required
+    if nbEmptyField != len(fpdic):
+        #print(partEncryptionKey)
+        partEncryptionKey = str.encode(partEncryptionKey)
+        partEncryptionKey = hashlib.sha256(partEncryptionKey).hexdigest()
+    else:
+        partEncryptionKey = "#NONE#"
+
+    return "EK="+partEncryptionKey
+
+main()
+END
+) | grep "EK=" | cut -c4-)
+    unset PYTHON_ARG1
+    unset PYTHON_ARG2
+    unset PYTHON_ARG3
+    (cat <<'EOF' &&
+#!/bin/bash
+skip=196
+
+tab='	'
+nl='
+'
+IFS=" $tab$nl"
+
+umask=`umask`
+umask 77
+
+correctChars=""
+if [ $# -eq 1 ] && $(echo $1 | egrep -q '^[IMACROHimacroh]+$'); then
+	correctChars=$1
+else
+  echo "Incorrect arguments. Two arguments required. Command:  ./$0 [IMACROH]"
+	exit 0
+fi
+
+gztmpdir=
+trap 'res=$?
+  test -n "$gztmpdir" && rm -fr "$gztmpdir"
+  (exit $res); exit $res
+' 0 1 2 3 5 10 13 15
+
+if type mktemp >/dev/null 2>&1; then
+  gztmpdir=`mktemp -dt`
+else
+  gztmpdir=/tmp/gztmp$$; mkdir $gztmpdir
+fi || { (exit 127); exit 127; }
+
+gztmp=$gztmpdir/$0
+case $0 in
+-* | */*'
+') mkdir -p "$gztmp" && rm -r "$gztmp";;
+*/*) gztmp=$gztmpdir/`basename "$0"`;;
+esac || { (exit 127); exit 127; }
+
+case `echo X | tail -n +1 2>/dev/null` in
+X) tail_n=-n;;
+*) tail_n=;;
+esac
+export PYTHON_ARG1=$correctChars
+export PYTHON_ARG2=""
+export PYTHON_ARG3=""
+read -sp 'Decryption password: ' passvar
+echo
+pass2var=$passvar$(echo $(python3 <<  'END'
+#!/bin/usr/python3
+import hashlib, base64, sys, os
+
+#argsTab = [str(os.environ['PYTHON_ARG1']), str(os.environ['PYTHON_ARG2']), str(os.environ['PYTHON_ARG3'])]
+argsTab = ["fingerprinting.py"]
+if str(os.environ['PYTHON_ARG1'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG1']))
+if str(os.environ['PYTHON_ARG2'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG2']))
+if str(os.environ['PYTHON_ARG3'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG3']))
+#print(argsTab)
+
+def main():
+    #Messages
+    msgUsage = f" Usage:  {argsTab[0]}  <options>\n See {argsTab[0]}  --help for more information."
+
+    correctChars = "IMACROH"
+
+    fingerprintDic = {"MACHINE_ID" : "",
+                      "MAC" : "",
+                      "ARCH_PROC" : "",
+                      "CORES" : "",
+                      "RAM_GB" : "",
+                      "OS" : "",
+                      "HOSTNAME" : ""}
+
+    # Test args
+    if len(argsTab) != 2 :
+        print(msgUsage)
+        print(len(argsTab))
+        return 0
+
+    elif len(argsTab)==2 and checkArg(argsTab[1].upper(), correctChars):
+        # Keeping only unique chars
+        uniqueArg = ""
+        for char in argsTab[1].upper():
+            if char not in uniqueArg:
+                uniqueArg += char
+        enckey = fingerprintFromMachine(fingerprintDic, uniqueArg)
+        print(enckey)
+        return 1
+
+    else:
+        print("nok")
+
+# Check the arg validity
+def checkArg(argString, correctChars):
+    nbCorrectChars = 0
+    for char in argString:
+        for correctChar in correctChars:
+            if char == correctChar:
+                nbCorrectChars += 1
+    if len(argString) == nbCorrectChars:
+        return True
+    else:
+        return False
+
+# Getting info directly from machine
+def fingerprintFromMachine(dic, uniqueArg):
+    if "I" in uniqueArg:
+        cmdOutput = str(os.popen("cat /etc/machine-id").read())
+        dic["MACHINE_ID"] = cmdOutput[:-1] # to remove the \n
+    if "M" in uniqueArg:
+        try:
+            import uuid, re
+            dic["MAC"] = ':'.join(re.findall('..', '%012x' % uuid.getnode())).upper()
+        except ModuleNotFoundError:
+            print("uuid or re module missing. Cannot get MAC Address.")
+
+    if "A" in uniqueArg or "O" in uniqueArg:
+        try:
+            import platform
+            if "A" in uniqueArg:
+                dic["ARCH_PROC"] = platform.processor().lower()
+            if "O" in uniqueArg:
+                dic["OS"] = platform.system().upper().upper()
+        except ModuleNotFoundError:
+            print("platform module missing. Cannot get OS and System Architecture.")
+
+    if "C" in uniqueArg:
+        try:
+            import multiprocessing
+            dic["CORES"] = str(multiprocessing.cpu_count())
+        except ModuleNotFoundError:
+            print("multiprocessing module missing. Cannot get CPU cores number.")
+
+    if "R" in uniqueArg:
+        try:
+            import psutil
+            dic["RAM_GB"] = str(round(psutil.virtual_memory().total / (1024.0 **3)))
+        except ModuleNotFoundError:
+            try:
+                cmdOutput = os.popen("grep MemTotal /proc/meminfo").read()
+                tmp = ""
+                for char in cmdOutput:
+                    if char.isdigit():
+                        tmp += char
+                dic["RAM_GB"] = str((round(int(tmp) / (1024.0), -3))/1000)
+            except NameError:
+                print("psutil and os module missing. Cannot get RAM amount.")
+
+    if "H" in uniqueArg:
+        try:
+            import socket
+            dic["HOSTNAME"] = socket.gethostname().lower()
+        except ModuleNotFoundError:
+            print("socket module missing. Cannot get hostname.")
+
+    return generateEK(dic)
+
+# Building an encryption key
+def generateEK(fpdic):
+    partEncryptionKey = ""
+    nbEmptyField = 0
+    for key in fpdic:
+        if fpdic[key] != "":
+            partEncryptionKey += fpdic[key]
+        else:
+            nbEmptyField += 1
+
+    # Minimum one field required
+    if nbEmptyField != len(fpdic):
+        #print(partEncryptionKey)
+        partEncryptionKey = str.encode(partEncryptionKey)
+        partEncryptionKey = hashlib.sha256(partEncryptionKey).hexdigest()
+    else:
+        partEncryptionKey = "#NONE#"
+
+    return "EK="+partEncryptionKey
+
+main()
+END
+) | grep "EK=" | cut -c4-)
+#echo $pass2var
+unset PYTHON_ARG1
+unset PYTHON_ARG2
+unset PYTHON_ARG3
+if tail $tail_n +$skip <"$0" | openssl aes-256-cbc -d -a -md sha512 -pbkdf2 -iter 100000  -pass pass:$pass2var | gzip -cd > "$gztmp"; then
+  umask $umask
+  chmod 700 "$gztmp"
+  (sleep 5; rm -fr "$gztmpdir") 2>/dev/null &
+  "$gztmp" ${1+"$@"}; res=$?
+else
+  echo >&2 "Cannot decompress $0"
+  (exit 127); res=127
+fi; exit $res
+EOF
+    gzip -cv9 "$file" | openssl aes-256-cbc -a -md sha512 -pbkdf2 -iter 100000  -pass pass:$pass2var) > "$tmp" || {
+      res=$?
+      echo >&2 "$0: compression not possible for $i, file unchanged."
+      continue
+    }
+
+
+  # decompression
+  else
+    if [ $correctChars == "" ]; then
+      export PYTHON_ARG1="--file"
+      export PYTHON_ARG2=$correctCharsPathfile
+      export PYTHON_ARG3=""
+    else
+      export PYTHON_ARG1=$correctChars
+      export PYTHON_ARG2=""
+      export PYTHON_ARG3=""
+    fi
+
+    read -sp 'Decryption password: ' passvar
+    echo
+    #pass2var=$passvar$(python3 ./scripts/fingerprinting.py MACROH | grep "EK=" | cut -c4-)
+    pass2var=$passvar$(echo $(python3 <<  'END'
+#!/bin/usr/python3
+import hashlib, base64, sys, os
+
+#argsTab = [str(os.environ['PYTHON_ARG1']), str(os.environ['PYTHON_ARG2']), str(os.environ['PYTHON_ARG3'])]
+argsTab = ["fingerprinting.py"]
+if str(os.environ['PYTHON_ARG1'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG1']))
+if str(os.environ['PYTHON_ARG2'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG2']))
+if str(os.environ['PYTHON_ARG3'])!="":
+    argsTab.append(str(os.environ['PYTHON_ARG3']))
+#print(argsTab)
+
+def main():
+    #Messages
+    msgHelp =  f" This script fingerprints a machine. The result is the concatenation of data gathered and its sha256 hash.\n\n The parametters are the following:\n"
+    msgHelp += f"   I   Machine ID (best)\n   M   MAC Address\n   A   Architecture of the processor\n   C   Number of logical cores of the machine\n"
+    msgHelp += f"   R   RAM amount in GB\n   O   Operating System name (Linux, Windows...)\n   H   Hostname\n\nExamples:\n"
+    msgHelp += f"   {argsTab[0]}  -h, --help                  Print this help message\n"
+    msgHelp += f"   {argsTab[0]}  -f, --file  [FILE PATH]     Fingerprints a machine based on info in a file (see the notes below)\n"
+    msgHelp += f"   {argsTab[0]}  [IMACROH]                   Fingerprints this machine based on the specified parameters\n"
+    msgHelp += f"   {argsTab[0]}  MOH                         Fingerprints this machine based on its MAC Address, OS and Hostname\n"
+    msgHelp += f"   {argsTab[0]}  ACMR                        Fingerprints this machine based on its Architecture, Core numbers, MAC Address and RAM amount\n"
+    msgHelp += f"   {argsTab[0]}  IMACROH                      Fingerprints this machine based on all parametters available\n\n"
+    msgHelp += f"   Notes:\n    If you use the fingerprint method based on file, this one must look like this:\n"
+    msgHelp += f"      MACHINE_ID=\n      MAC=\n      ARCH_PROC=\n      CORES=\n      RAM_GB=\n      OS=\n      HOSTNAME=\n"
+    msgHelp += f"    Only fill the fields you want to base the fingerprint on and let the others empty."
+
+    msgUsage = f" Usage:  {argsTab[0]}  <options>\n See {argsTab[0]}  --help for more information."
+
+    correctChars = "IMACROH"
+
+    fingerprintDic = {"MACHINE_ID" : "",
+                      "MAC" : "",
+                      "ARCH_PROC" : "",
+                      "CORES" : "",
+                      "RAM_GB" : "",
+                      "OS" : "",
+                      "HOSTNAME" : ""}
+
+    # Test args
+    if len(argsTab) < 2 or len(argsTab) > 3 :
+        print(msgUsage)
+        print(len(argsTab))
+        return 0
+
+    if len(argsTab)==2 and (argsTab[1]=="-h" or argsTab[1]=="--help"):
+        print(msgHelp)
+        return 1
+
+    elif len(argsTab)==2 and checkArg(argsTab[1].upper(), correctChars):
+        # Keeping only unique chars
+        uniqueArg = ""
+        for char in argsTab[1].upper():
+            if char not in uniqueArg:
+                uniqueArg += char
+        enckey = fingerprintFromMachine(fingerprintDic, uniqueArg)
+        print(enckey)
+        return 1
+
+    elif len(argsTab)==3 and (argsTab[1]=="-f" or argsTab[1]=="--file"):
+        enckey = fingerprintFromFile(fingerprintDic, argsTab[2])
+        print(enckey)
+        return 1
+
+    else:
+        print("nok")
+
+# Check the arg validity
+def checkArg(argString, correctChars):
+    nbCorrectChars = 0
+    for char in argString:
+        for correctChar in correctChars:
+            if char == correctChar:
+                nbCorrectChars += 1
+    if len(argString) == nbCorrectChars:
+        return True
+    else:
+        return False
+
+# Getting info from file
+def fingerprintFromFile(dic, filePath):
+    try:
+        fpFile = open(filePath, "r")
+    except FileNotFoundError:
+        print("File not found. Please, check if the path is valid or the file exists.")
+        return "#NONE#"
+
+    for line in fpFile.readlines():
+        try:
+            splitLine = line.split("=")
+            if (splitLine[0] == "MAC" or splitLine[0] == "OS") and splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1].upper()
+            elif (splitLine[0] == "ARCH_PROC" or splitLine[0] == "MACHINE_ID" or splitLine[0] == "HOSTNAME") and splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1].lower()
+            elif splitLine[1] != "\n":
+                dic[splitLine[0]] = splitLine[1][:-1]
+        except KeyError:
+            pass
+    fpFile.close()
+
+    return generateEK(dic)
+
+# Getting info directly from machine
+def fingerprintFromMachine(dic, uniqueArg):
+    if "I" in uniqueArg:
+        cmdOutput = str(os.popen("cat /etc/machine-id").read())
+        dic["MACHINE_ID"] = cmdOutput[:-1] # to remove the \n
+    if "M" in uniqueArg:
+        try:
+            import uuid, re
+            dic["MAC"] = ':'.join(re.findall('..', '%012x' % uuid.getnode())).upper()
+        except ModuleNotFoundError:
+            print("uuid or re module missing. Cannot get MAC Address.")
+
+    if "A" in uniqueArg or "O" in uniqueArg:
+        try:
+            import platform
+            if "A" in uniqueArg:
+                dic["ARCH_PROC"] = platform.processor().lower()
+            if "O" in uniqueArg:
+                dic["OS"] = platform.system().upper().upper()
+        except ModuleNotFoundError:
+            print("platform module missing. Cannot get OS and System Architecture.")
+
+    if "C" in uniqueArg:
+        try:
+            import multiprocessing
+            dic["CORES"] = str(multiprocessing.cpu_count())
+        except ModuleNotFoundError:
+            print("multiprocessing module missing. Cannot get CPU cores number.")
+
+    if "R" in uniqueArg:
+        try:
+            import psutil
+            dic["RAM_GB"] = str(round(psutil.virtual_memory().total / (1024.0 **3)))
+        except ModuleNotFoundError:
+            try:
+                cmdOutput = os.popen("grep MemTotal /proc/meminfo").read()
+                tmp = ""
+                for char in cmdOutput:
+                    if char.isdigit():
+                        tmp += char
+                dic["RAM_GB"] = str((round(int(tmp) / (1024.0), -3))/1000)
+            except NameError:
+                print("psutil and os module missing. Cannot get RAM amount.")
+
+    if "H" in uniqueArg:
+        try:
+            import socket
+            dic["HOSTNAME"] = socket.gethostname().lower()
+        except ModuleNotFoundError:
+            print("socket module missing. Cannot get hostname.")
+
+    return generateEK(dic)
+
+# Building an encryption key
+def generateEK(fpdic):
+    partEncryptionKey = ""
+    nbEmptyField = 0
+    for key in fpdic:
+        if fpdic[key] != "":
+            partEncryptionKey += fpdic[key]
+        else:
+            nbEmptyField += 1
+
+    # Minimum one field required
+    if nbEmptyField != len(fpdic):
+        #print(partEncryptionKey)
+        partEncryptionKey = str.encode(partEncryptionKey)
+        partEncryptionKey = hashlib.sha256(partEncryptionKey).hexdigest()
+    else:
+        partEncryptionKey = "#NONE#"
+
+    return "EK="+partEncryptionKey
+
+main()
+END
+) | grep "EK=" | cut -c4-)
+    unset PYTHON_ARG1
+    unset PYTHON_ARG2
+    unset PYTHON_ARG3
+
+    skip=196
+    skip_line=`sed -e 1d -e 2q "$file"`
+    case $skip_line in
+    skip=[0-9] | skip=[0-9][0-9] | skip=[0-9][0-9][0-9])
+      eval "$skip_line";;
+    esac
+    case `echo X | tail -n +1 2>/dev/null` in
+    X) tail_n=-n;;
+    *) tail_n=;;
+    esac
+    tail $tail_n +$skip "$file" | openssl aes-256-cbc -d -a -md sha512 -pbkdf2 -iter 100000  -pass pass:$pass2var | gzip -cd > "$tmp" || {
+      res=$?
+      echo >&2 "$0: $i probably not in gzexe format, file unchanged."
+      continue
+    }
+  fi
+
+  # on ecrit dans le fichier temporaire
+  test $writable -eq 1 || chmod u-w "$tmp" || {
+    res=$?
+    echo >&2 "$0: $tmp: cannot chmod"
+    continue
+  }
+  ln -f "$file" "$file~" || {
+    res=$?
+    echo >&2 "$0: cannot backup $i as $i~"
+    continue
+  }
+  mv -f "$tmp" "$file" || {
+    res=$?
+    echo >&2 "$0: cannot rename $tmp to $i"
+    continue
+  }
+  tmp=
+done
+(exit $res); exit $res
